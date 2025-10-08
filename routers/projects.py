@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from database import supabase
@@ -10,6 +11,20 @@ router = APIRouter(
 class ProjectCreate(BaseModel):
     name: str
     description: str = ""
+
+
+class ProjectSettings(BaseModel):
+    embedding_model: str
+    rag_strategy: str
+    agent_type: str
+    chunks_per_search: int
+    final_context_size: int
+    similarity_threshold: float
+    number_of_queries: int
+    reranking_enabled: bool
+    reranking_model: str
+    vector_weight: float
+    keyword_weight: float
 
 @router.get("/api/projects") 
 def get_projects(clerk_id: str = Depends(get_current_user)): 
@@ -156,3 +171,31 @@ async def get_project_settings(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail = f"Failed to get project settings: {str(e)}")
+
+
+@router.put("/api/projects/{project_id}/settings")
+async def update_project_settings(
+    project_id: str, 
+    settings: ProjectSettings, 
+    clerk_id: str = Depends(get_current_user)
+): 
+    try: 
+        # First verify the project exists and belongs to the user
+        project_result = supabase.table("projects").select("id").eq("id", project_id).eq("clerk_id", clerk_id).execute()    
+
+        if not project_result.data:
+            raise HTTPException(status_code=404, detail = f"Project not found or access denied")
+
+        # Perform the update
+        result = supabase.table("project_settings").update(settings.model_dump()).eq("project_id", project_id).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail = f"Project settings not found")
+
+        return {
+            "message": "Project settings updated successfully", 
+            "data": result.data[0]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail = f"Failed to update project settings: {str(e)}")
