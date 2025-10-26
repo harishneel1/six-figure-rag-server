@@ -8,6 +8,10 @@ from unstructured.chunking.title import chunk_by_title
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.messages import HumanMessage
 import os
+from scrapingbee import ScrapingBeeClient
+
+
+scrapingbee_client = ScrapingBeeClient(api_key=os.getenv('SCRAPINGBEE_API_KEY'))
 
 # Initialize LLM for summarization
 llm = ChatOpenAI(model="gpt-4-turbo", temperature=0)
@@ -91,7 +95,9 @@ def process_document(document_id: str):
         }
 
     except Exception as e: 
-        pass
+        print(f"❌ ERROR processing document {document_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
    
 
 def download_and_partition(document_id: str, document: dict):
@@ -103,7 +109,18 @@ def download_and_partition(document_id: str, document: dict):
 
     if source_type == "url":
         # Crawl URL 
-        pass
+        url = document["source_url"] 
+        
+        # Fetch content with ScrapingBee
+        response = scrapingbee_client.get(url)
+        
+        # Save to temp file
+        temp_file = f"/tmp/{document_id}.html"
+        with open(temp_file, 'wb') as f:
+            f.write(response.content)
+        
+        elements = partition_document(temp_file, "html", source_type="url")
+
 
     else:
         # Handle file processing
@@ -136,7 +153,9 @@ def partition_document(temp_file: str, file_type: str, source_type: str = "file"
     """ Partition document based on file type and source type """
 
     if source_type == "url": 
-        pass
+        return partition_html(
+            filename=temp_file
+        )
 
     if file_type == "pdf":
         return partition_pdf(
