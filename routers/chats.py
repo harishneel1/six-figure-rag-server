@@ -4,6 +4,8 @@ from database import supabase
 from auth import get_current_user
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from typing import List, Dict
+
 
 
 # Initialize LLM for summarization
@@ -88,12 +90,35 @@ async def get_chat(
         raise HTTPException(status_code=500, detail=f"Failed to get chat: {str(e)}")
 
 
+def load_project_settings(project_id: str) -> dict:
+    """Load project settings from database"""
+    print(f"⚙️ Fetching project settings...")
+    settings_result = supabase.table('project_settings').select('*').eq('project_id', project_id).execute()
+    
+    if not settings_result.data:
+        raise HTTPException(status_code=404, detail="Project settings not found")
+    
+    settings = settings_result.data[0]
+    print(f"✅ Settings retrieved")
+    return settings
+
+def get_document_ids(project_id: str) -> List[str]:
+    """Get all document IDs for a project"""
+    print(f"📄 Fetching project documents...")
+    documents_result = supabase.table('project_documents').select('id').eq('project_id', project_id).execute()
+    
+    document_ids = [doc['id'] for doc in documents_result.data]
+    print(f"✅ Found {len(document_ids)} documents")
+    return document_ids
+
+
 class SendMessageRequest(BaseModel):
     content: str
 
 @router.post("/api/projects/{project_id}/chats/{chat_id}/messages")
 async def send_message(
     chat_id: str,
+    project_id: str,
     request: SendMessageRequest,
     clerk_id: str = Depends(get_current_user)
 ):
@@ -117,20 +142,36 @@ async def send_message(
         user_message = user_message_result.data[0]
         print(f"✅ User message saved: {user_message['id']}")
         
-        # 2. Call LLM with system prompt + user message
-        print(f"🤖 Calling LLM...")
-        messages = [
-            SystemMessage(content="You are a helpful AI assistant. Provide clear, concise, and accurate responses."),
-            HumanMessage(content=message)
-        ]
+        # 2. Load project settings
+        # We need settings to know: chunk size, similarity threshold, etc.
+        settings = load_project_settings(project_id)
         
-        response = llm.invoke(messages)
-        ai_response = response.content
+        # 3. Get document IDs for this project
+        # This narrows our search scope to only documents uploaded to this specific project
+        document_ids = get_document_ids(project_id)
+
         
-        print(f"✅ LLM response received: {len(ai_response)} chars")
+        # 4. Generate query embedding
+        # Convert the user's text question into a vector so we can perform similarity search
         
-        # 3. Save AI message
+        # 5. Perform vector search using the RPC function
+        # Search through the chunks to find the most relevant chunks for answering the question
+        
+        # 6. Build context from retrieved chunks
+        # Format the retrieved chunks into a structured context with citations
+        
+        # 7. Build system prompt with injected context
+        # Add the retrieved document context to the system prompt so the LLM can answer based on the documents
+        
+        # 8. Call LLM & get response
+        # The LLM now has access to relevant document chunks and can provide informed answers
+        
+        # 9. Save AI message with citations to database
+        # Store the AI's response along with citations
+        
         print(f"💾 Saving AI message...")
+        ai_response = "This is a test response from the AI assistant."
+
         ai_message_result = supabase.table('messages').insert({
             "chat_id": chat_id,
             "content": ai_response,
