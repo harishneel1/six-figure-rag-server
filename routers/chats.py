@@ -4,7 +4,7 @@ from database import supabase
 from auth import get_current_user
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 
 # Initialize LLM for summarization
@@ -130,6 +130,173 @@ def vector_search(query: str, document_ids: List[str], settings: dict) -> List[D
     return result.data if result.data else []
 
 
+def build_context(chunks: List[Dict]) -> Tuple[List[str], List[str], List[str], List[Dict]]:
+    """
+    Returns:
+        Tuple of (texts, images, tables, citations)
+    """
+    if not chunks:
+        return [], [], [], []
+    
+    texts = []
+    images = []
+    tables = []
+    citations = [] 
+    
+    # Batch fetch all filenames in ONE query
+    doc_ids = [chunk['document_id'] for chunk in chunks if chunk.get('document_id')]
+    unique_doc_ids: List[str] = list(set(doc_ids))  # ✅ Fixed syntax
+    
+    filename_map = {}
+    
+    if unique_doc_ids:
+        result = supabase.table('project_documents')\
+            .select('id, filename')\
+            .in_('id', unique_doc_ids)\
+            .execute()
+        filename_map = {doc['id']: doc['filename'] for doc in result.data}
+    
+    # Process each chunk
+    for chunk in chunks:
+        original_content = chunk.get('original_content', {})
+        
+        # Extract content from chunk
+        chunk_text = original_content.get('text', '')
+        chunk_images = original_content.get('images', [])
+        chunk_tables = original_content.get('tables', [])
+
+        # Collect content
+        if chunk_text:  # ✅ Add this check back
+            texts.append(chunk_text)
+        images.extend(chunk_images)
+        tables.extend(chunk_tables)
+        
+        # Add citation for every chunk
+        doc_id = chunk.get('document_id')
+        if doc_id:
+            citations.append({
+                "chunk_id": chunk.get('id'),
+                "document_id": doc_id,
+                "filename": filename_map.get(doc_id, 'Unknown Document'),
+                "page": chunk.get('page_number', 'Unknown')
+            })
+    
+    return texts, images, tables, citations
+
+
+def prepare_prompt_and_invoke_llm(
+    user_query: str,
+    texts: List[str],
+    images: List[str],
+    tables: List[str]
+) -> str:
+    """
+    Builds system prompt with context and invokes LLM with multi-modal support
+    
+    Args:
+        user_query: The user's question
+        texts: List of text chunks from documents
+        images: List of base64-encoded images
+        tables: List of HTML table strings
+    
+    Returns:
+        AI response string
+    """
+    # Build system prompt parts
+    prompt_parts = []
+    
+    # Main instruction
+    prompt_parts.append(
+        "You are a helpful AI assistant that answers questions based solely on the provided context. "
+        "Your task is to provide accurate, detailed answers using ONLY the information available in the context below.\n\n"
+        "IMPORTANT RULES:\n"
+        "- Only answer based on the provided context (texts, tables, and images)\n"
+        "- If the answer cannot be found in the context, respond with: 'I don't have enough information in the provided context to answer that question.'\n"
+        "- Do not use external knowledge or make assumptions beyond what's explicitly stated\n"
+        "- When referencing information, be specific and cite relevant parts of the context\n"
+        "- Synthesize information from texts, tables, and images to provide comprehensive answers\n\n"
+    )
+    
+    # Add text contexts
+    if texts:
+        prompt_parts.append("=" * 80)
+        prompt_parts.append("CONTEXT DOCUMENTS")
+        prompt_parts.append("=" * 80 + "\n")
+        
+        for i, text in enumerate(texts, 1):
+            prompt_parts.append(f"--- Document Chunk {i} ---")
+            prompt_parts.append(text.strip())
+            prompt_parts.append("")
+    
+    # Add tables if present
+    if tables:
+        prompt_parts.append("\n" + "=" * 80)
+        prompt_parts.append("RELATED TABLES")
+        prompt_parts.append("=" * 80)
+        prompt_parts.append(
+            "The following tables contain structured data that may be relevant to your answer. "
+            "Analyze the table contents carefully.\n"
+        )
+        
+        for i, table_html in enumerate(tables, 1):
+            prompt_parts.append(f"--- Table {i} ---")
+            prompt_parts.append(table_html)
+            prompt_parts.append("")
+    
+    # Reference images if present
+    if images:
+        prompt_parts.append("\n" + "=" * 80)
+        prompt_parts.append("RELATED IMAGES")
+        prompt_parts.append("=" * 80)
+        prompt_parts.append(
+            f"{len(images)} image(s) will be provided alongside the user's question. "
+            "These images may contain diagrams, charts, figures, formulas, or other visual information. "
+            "Carefully analyze the visual content when formulating your response. "
+            "The images are part of the retrieved context and should be used to answer the question.\n"
+        )
+    
+    # Final instruction
+    prompt_parts.append("=" * 80)
+    prompt_parts.append(
+        "Based on all the context provided above (documents, tables, and images), "
+        "please answer the user's question accurately and comprehensively."
+    )
+    prompt_parts.append("=" * 80)
+    
+    system_prompt = "\n".join(prompt_parts)
+    
+    # Build messages for LLM
+    messages = [SystemMessage(content=system_prompt)]
+    
+    # Create human message with user query and images
+    if images:
+        # Multi-modal message: text + images
+        content_parts = [{"type": "text", "text": user_query}]
+        
+        # Add each image to the content array
+        for img_base64 in images:
+            # Clean base64 string if it has data URI prefix
+            if img_base64.startswith('data:image'):
+                img_base64 = img_base64.split(',', 1)[1]
+            
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}
+            })
+        
+        messages.append(HumanMessage(content=content_parts))
+    else:
+        # Text-only message
+        messages.append(HumanMessage(content=user_query))
+    
+    # Invoke LLM and return response
+    print(f"🤖 Invoking LLM with {len(messages)} messages ({len(texts)} texts, {len(tables)} tables, {len(images)} images)...")
+    response = llm.invoke(messages)
+    
+    return response.content
+
+
+
 class SendMessageRequest(BaseModel):
     content: str
 
@@ -177,25 +344,30 @@ async def send_message(
 
         # 6. Build context from retrieved chunks
         # Format the retrieved chunks into a structured context with citations
+        texts, images, tables, citations = build_context(chunks)
         
         # 7. Build system prompt with injected context
         # Add the retrieved document context to the system prompt so the LLM can answer based on the documents
+        print(f"🤖 Preparing context and calling LLM...")
+        ai_response = prepare_prompt_and_invoke_llm(
+            user_query=message,
+            texts=texts,
+            images=images,
+            tables=tables
+        )
+
         
-        # 8. Call LLM & get response
-        # The LLM now has access to relevant document chunks and can provide informed answers
-        
-        # 9. Save AI message with citations to database
+        # 8. Save AI message with citations to database
         # Store the AI's response along with citations
         
         print(f"💾 Saving AI message...")
-        ai_response = "This is a test response from the AI assistant."
 
         ai_message_result = supabase.table('messages').insert({
             "chat_id": chat_id,
             "content": ai_response,
             "role": "assistant",
             "clerk_id": clerk_id,
-            "citations": []
+            "citations": citations
         }).execute()
         
         ai_message = ai_message_result.data[0]
