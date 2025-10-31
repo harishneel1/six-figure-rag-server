@@ -3,13 +3,18 @@ from pydantic import BaseModel
 from database import supabase
 from auth import get_current_user
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from typing import List, Dict
-
 
 
 # Initialize LLM for summarization
 llm = ChatOpenAI(model="gpt-4o", temperature=0)
+
+# Initialize embeddings model
+embeddings_model = OpenAIEmbeddings(
+    model="text-embedding-3-large",
+    dimensions=1536
+)
 
 router = APIRouter(
     tags=["chats"]
@@ -111,6 +116,19 @@ def get_document_ids(project_id: str) -> List[str]:
     print(f"✅ Found {len(document_ids)} documents")
     return document_ids
 
+def vector_search(query: str, document_ids: List[str], settings: dict) -> List[Dict]:
+    """Execute vector search"""
+    query_embedding = embeddings_model.embed_query(query)
+    
+    result = supabase.rpc('vector_search_document_chunks', {
+        'query_embedding': query_embedding,
+        'filter_document_ids': document_ids,
+        'match_threshold': settings['similarity_threshold'],
+        'chunks_per_search': settings['chunks_per_search']
+    }).execute()
+    
+    return result.data if result.data else []
+
 
 class SendMessageRequest(BaseModel):
     content: str
@@ -152,11 +170,11 @@ async def send_message(
 
         
         # 4. Generate query embedding
-        # Convert the user's text question into a vector so we can perform similarity search
-        
-        # 5. Perform vector search using the RPC function
-        # Search through the chunks to find the most relevant chunks for answering the question
-        
+        # 5. Perform vector search using the RPC function 
+        chunks = vector_search(message, document_ids, settings)
+        print(f"✅ Retrieved {len(chunks)} relevant chunks from vector search")
+
+
         # 6. Build context from retrieved chunks
         # Format the retrieved chunks into a structured context with citations
         
